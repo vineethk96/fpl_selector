@@ -28,6 +28,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
+import time
 from datetime import datetime
 import math
 
@@ -37,7 +38,7 @@ class LiveDraftTool:
         self.draft_order = []
         self.current_round = 1
         self.your_position = 7  # Default to 7th pick as mentioned
-        self.total_teams = 12   # Standard league size
+        self.total_teams = 10   # Standard league size
         self.players_data = None
         self.analysis_data = None
         

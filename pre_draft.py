@@ -22,9 +22,31 @@ import numpy as np
 import requests
 import os
 import json
+import time
 from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
+
+class FbRefRateLimiter:
+    """Rate limiter for FbRef API that enforces 6-second delays between calls"""
+    
+    def __init__(self, min_interval: float = 6.0):
+        self.min_interval = min_interval
+        self.last_call_time = 0
+        self.total_calls = 0
+        
+    def wait_if_needed(self):
+        """Wait if needed to maintain rate limit"""
+        current_time = time.time()
+        elapsed = current_time - self.last_call_time
+        
+        if elapsed < self.min_interval:
+            sleep_time = self.min_interval - elapsed
+            print(f"⏱️  Rate limiting: waiting {sleep_time:.1f} seconds...")
+            time.sleep(sleep_time)
+        
+        self.last_call_time = time.time()
+        self.total_calls += 1
 
 class PreDraftAnalyzer:
     def __init__(self):
@@ -34,6 +56,7 @@ class PreDraftAnalyzer:
             print("Set it with: export FBRAPI_KEY='your_api_key_here'")
         
         self.base_url = "https://api.fbrapi.com/v1"
+        self.rate_limiter = FbRefRateLimiter()  # Add rate limiter for API calls
         self.position_weights = self._initialize_position_weights()
         self.premier_league_teams = [
             'Arsenal', 'Aston Villa', 'AFC Bournemouth', 'Brentford', 'Brighton & Hove Albion',
@@ -74,9 +97,40 @@ class PreDraftAnalyzer:
             }
         }
     
+    def _make_api_request(self, url, headers=None, timeout=30):
+        """Make a rate-limited API request"""
+        if headers is None:
+            headers = {
+                'Authorization': f'Bearer {self.api_key}',
+                'Content-Type': 'application/json'
+            }
+        
+        # Apply rate limiting
+        self.rate_limiter.wait_if_needed()
+        
+        try:
+            print(f"📡 Making API call {self.rate_limiter.total_calls}...")
+            response = requests.get(url, headers=headers, timeout=timeout)
+            
+            if response.status_code == 200:
+                print(f"✅ API call successful")
+                return response.json()
+            elif response.status_code == 429:
+                print(f"⚠️  Rate limit hit (429). Waiting additional 10 seconds...")
+                time.sleep(10)
+                return self._make_api_request(url, headers, timeout)  # Retry
+            else:
+                print(f"❌ API call failed with status {response.status_code}")
+                return None
+                
+        except requests.RequestException as e:
+            print(f"❌ Network error: {e}")
+            return None
+    
     def fetch_premier_league_data(self, season='2024-25'):
         """Fetch current Premier League player data from FBR API"""
         print(f"Fetching Premier League data for {season}...")
+        print(f"⏱️  This will take time due to 6-second API rate limiting...")
         
         # Example FBR API endpoints (adjust based on actual API documentation)
         endpoints = {
@@ -91,27 +145,115 @@ class PreDraftAnalyzer:
         }
         
         all_data = {}
+        total_calls = len(endpoints)
+        estimated_time = total_calls * 6 / 60 # in minutes
+
+        print(f"📊 Will make {total_calls} API calls")
+        print(f"⏰ Estimated time: {estimated_time:.1f} minutes")
+        print()
+
+        start_time = time.time()
         
-        for data_type, url in endpoints.items():
-            try:
-                print(f"Fetching {data_type}...")
-                response = requests.get(url, headers=headers, timeout=30)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    all_data[data_type] = data
-                    print(f"✓ Successfully fetched {data_type}")
-                else:
-                    print(f"✗ Error fetching {data_type}: {response.status_code}")
-                    # Fallback to sample data for demo
-                    all_data[data_type] = self._get_sample_data(data_type)
-                    
-            except requests.RequestException as e:
-                print(f"✗ Network error fetching {data_type}: {e}")
+        for i, (data_type, url) in enumerate(endpoints.items(), 1):
+            print(f"[{i}/{total_calls}] Fetching {data_type}...")
+            
+            data = self._make_api_request(url)
+            
+            if data is not None:
+                all_data[data_type] = data
+                print(f"✅ Successfully fetched {data_type}")
+            else:
+                print(f"⚠️  Failed to fetch {data_type}, using sample data")
                 all_data[data_type] = self._get_sample_data(data_type)
+            
+            # Show progress
+            elapsed = time.time() - start_time
+            if i < total_calls:
+                remaining_calls = total_calls - i
+                estimated_remaining = remaining_calls * 6 / 60
+                print(f"⏱️  Progress: {i}/{total_calls} complete. "
+                      f"Estimated time remaining: {estimated_remaining:.1f} minutes")
+            print()
+        
+        total_time = time.time() - start_time
+        print(f"🎉 All API calls completed in {total_time/60:.1f} minutes")
         
         self._process_api_data(all_data)
         return all_data
+    
+    def fetch_detailed_player_data(self, player_ids):
+        """Fetch detailed data for specific players with rate limiting"""
+        print(f"🔍 Fetching detailed data for {len(player_ids)} players...")
+        
+        estimated_time = len(player_ids) * 6 / 60
+        print(f"⏰ Estimated time: {estimated_time:.1f} minutes")
+        
+        detailed_data = []
+        start_time = time.time()
+        
+        for i, player_id in enumerate(player_ids, 1):
+            print(f"[{i}/{len(player_ids)}] Fetching player {player_id}...")
+            
+            url = f"{self.base_url}/players/{player_id}/detailed"
+            data = self._make_api_request(url)
+            
+            if data:
+                detailed_data.append(data)
+                print(f"✅ Got data for player {player_id}")
+            else:
+                print(f"❌ Failed to get data for player {player_id}")
+            
+            # Progress update every 10 players
+            if i % 10 == 0 or i == len(player_ids):
+                elapsed = time.time() - start_time
+                remaining = len(player_ids) - i
+                remaining_time = remaining * 6 / 60
+                print(f"📊 Progress: {i}/{len(player_ids)} complete. "
+                      f"Time remaining: {remaining_time:.1f} minutes")
+            
+            print()
+        
+        total_time = time.time() - start_time
+        print(f"🎉 Detailed player data fetch completed in {total_time/60:.1f} minutes")
+        
+        return detailed_data
+    
+    def fetch_team_by_team_data(self):
+        """Fetch individual team data with rate limiting"""
+        print(f"🏟️  Fetching data for {len(self.premier_league_teams)} teams...")
+        
+        estimated_time = len(self.premier_league_teams) * 6 / 60
+        print(f"⏰ Estimated time: {estimated_time:.1f} minutes")
+        
+        team_data = {}
+        start_time = time.time()
+        
+        for i, team in enumerate(self.premier_league_teams, 1):
+            print(f"[{i}/{len(self.premier_league_teams)}] Fetching {team}...")
+            
+            # Convert team name to API-friendly format
+            team_slug = team.lower().replace(' ', '-').replace('&', 'and')
+            url = f"{self.base_url}/teams/{team_slug}/stats/2024-25"
+            
+            data = self._make_api_request(url)
+            
+            if data:
+                team_data[team] = data
+                print(f"✅ Got data for {team}")
+            else:
+                print(f"❌ Failed to get data for {team}")
+            
+            # Progress update
+            remaining = len(self.premier_league_teams) - i
+            remaining_time = remaining * 6 / 60
+            print(f"📊 Progress: {i}/{len(self.premier_league_teams)} complete. "
+                  f"Time remaining: {remaining_time:.1f} minutes")
+            print()
+        
+        total_time = time.time() - start_time
+        print(f"🎉 Team data fetch completed in {total_time/60:.1f} minutes")
+        
+        return team_data
     
     def _get_sample_data(self, data_type):
         """Return sample data when API is unavailable"""
@@ -338,6 +480,7 @@ class PreDraftAnalyzer:
         
         cheat_sheet = {
             'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'api_calls_made': self.rate_limiter.total_calls,
             'top_players_by_position': self.generate_position_rankings(25),
             'value_picks': self.identify_value_picks(),
             'team_analysis': self.team_analysis(),
